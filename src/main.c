@@ -19,7 +19,9 @@
 #include "sm_shell_icon.h"
 #include "sm_config_mount.h"
 #include "sm_game_lifecycle.h"
+#include "sm_env_ipmi.h"
 #include "sm_kstuff.h"
+#include "sm_kstuff_caps.h"
 #include "sm_mount_device.h"
 #include "sm_filesystem.h"
 #include "sm_image.h"
@@ -602,6 +604,17 @@ int main(void) {
     notify_system_l10n(SM_L10N_SHELLCORE_HOOKS_FAILED);
   }
   sm_shell_icon_install_if_missing();
+
+  // Probe eagerly so the answer is in the log from boot rather than only after
+  // a title asks. Only a positive is cached, so if kstuff loads after us this
+  // reading is provisional and the next ask re-probes -- see
+  // sm_kstuff_probe_caps.
+  (void)sm_kstuff_probe_caps(NULL);
+  // After sm_kstuff_init: the service reports that probe's answer. Never fatal
+  // -- a console with no backported title does not need this service at all.
+  if (!sm_env_ipmi_serve())
+    log_debug("  [ENVSVC] environment service unavailable; a backported title "
+              "that gates on kstuff will see unknown capabilities");
   if (!refresh_game_lifecycle_watcher())
     log_debug("  [GAME] lifecycle watcher unavailable");
   // Publish the initial AppFocus only after its lifecycle/kstuff consumers.
@@ -669,6 +682,9 @@ shutdown:
   stop_game_lifecycle_watcher();
   sm_shellcore_service_stop();
   sm_scanner_shutdown();
+  // Before sm_kstuff_shutdown: the dispatcher can be inside a query that reads
+  // the kstuff probe state, so the service has to stop answering first.
+  sm_env_ipmi_shutdown();
   sm_kstuff_shutdown();
   sm_mdbg_shutdown();
   bool title_mounts_released = shutdown_title_mounts();

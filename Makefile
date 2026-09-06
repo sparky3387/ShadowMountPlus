@@ -16,15 +16,18 @@ CFLAGS += -DSHADOWMOUNT_VERSION=\"$(VERSION_TAG)\"
 # Linker
 LDFLAGS := -flto=thin -Wl,--gc-sections
 
-# Libraries
-LIBS := -lSceNotification -lSceSystemService -lSceUserService -lSceAppInstUtil -lSceNet -lSceSsl -lSceHttp -lsqlite3 $(HOMEBREW_ROOT)/lib/libjson-c.a $(MHD_LIB) $(PNG_LIB) $(ZLIB_LIB) -lpthread -lm
+# Libraries. Every entry is 1.7's; -lSceIpmi is the environment service's.
+LIBS := -lSceNotification -lSceSystemService -lSceUserService -lSceAppInstUtil -lSceNet -lSceSsl -lSceHttp -lsqlite3 $(HOMEBREW_ROOT)/lib/libjson-c.a $(MHD_LIB) $(PNG_LIB) $(ZLIB_LIB) -lSceIpmi -lpthread -lm
 PS5_SCE_STUBS_DIR ?= $(PS5_PAYLOAD_SDK)/src/sce_stubs
 KERNEL_SYS_STUB_SO := src/libkernel_sys_ext.so
 KERNEL_SYS_STUB_SRCS := $(PS5_SCE_STUBS_DIR)/libkernel_sys.c src/libkernel_sys_ext.c
 
 ASSET_SRCS := src/notify_icon_asset.c src/config_ini_example_asset.c src/web_index_asset.c
 ASSET_SRCS += src/shell_icon_param_asset.c
-SRCS := src/main.c $(wildcard src/sm_*.c) $(ASSET_SRCS)
+# The environment IPMI service. Named explicitly rather than swept up by the
+# src/sm_*.c wildcard, because three of its four sources are not sm_ prefixed.
+IPMI_SRCS := src/ipmi_symbols.c src/ipmi_client.c src/ipmi_handler.c
+SRCS := src/main.c $(wildcard src/sm_*.c) $(IPMI_SRCS) $(ASSET_SRCS)
 ASM_SRCS := src/sm_shellcore_bridge.S
 OBJS := $(SRCS:.c=.o) $(ASM_SRCS:.S=.o)
 HEADERS := $(wildcard include/*.h)
