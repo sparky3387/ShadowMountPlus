@@ -1,0 +1,182 @@
+# Follow the parent and rebuild.
+#
+# WHY IT TRACKS 1.7 AND NOT main. Upstream moved development to the `1.7`
+# branch; `main` is still the 1.6 line. This fork's work sat on main and drifted
+# 104 commits behind without anything saying so, while the console ran upstream's
+# official 1.7beta2 release. Tracking the branch upstream actually develops on is
+# the whole point of this workflow, so the branch name is a top-level input
+# rather than buried in a step.
+#
+# WHY IT REBASES RATHER THAN MERGES. This fork is a small, ordered set of commits
+# on top of upstream (the environment IPMI service and its fixes). Rebasing keeps
+# it that way, so `git log upstream/1.7..HEAD` is always exactly "what we add" and
+# the port is reviewable. A merge would bury that in merge commits within weeks.
+#
+# WHY IT DISPATCHES THE BUILD EXPLICITLY. A push made with GITHUB_TOKEN does not
+# trigger other workflows -- GitHub suppresses that deliberately to stop
+# recursion -- so `ps5.yml`'s `on: push` would never fire here and the run would
+# silently produce no build. The dispatch at the end is not belt-and-braces, it
+# is the only thing that starts the build.
+#
+# A CONFLICT IS A STOP, NOT A RETRY. When upstream touches the same lines we do,
+# the rebase is abandoned, nothing is pushed, and an issue is opened naming the
+# files. Three of the four conflicts seen so far were purely additive and safe to
+# resolve by hand; none of them is safe to resolve by a strategy flag.
+
+name: Follow upstream and build
+
+on:
+  schedule:
+    # Daily. Upstream cuts releases every few weeks, so this is about noticing
+    # within a day rather than about keeping up minute to minute.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      upstream_branch:
+        description: "Upstream branch to follow"
+        required: false
+        default: "1.7"
+      force_build:
+        description: "Dispatch the build even when already up to date"
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: upstream-watch
+  cancel-in-progress: false
+
+permissions:
+  contents: write     # push the rebased branch
+  actions: write      # dispatch ps5.yml
+  issues: write       # report a conflict
+
+env:
+  UPSTREAM_REPO: https://github.com/drakmor/ShadowMountPlus
+  UPSTREAM_BRANCH: ${{ github.event.inputs.upstream_branch || '1.7' }}
+  # The branch carrying our commits on top of upstream.
+  FORK_BRANCH: envsvc-kstuff-capabilities-1.7
+
+jobs:
+  follow:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout our branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FORK_BRANCH }}
+          # Full history AND tags: the build stamps its version from
+          # `git describe --tags`, so a shallow clone would name the binary
+          # after nothing and the deployed ELF would be unidentifiable.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Fetch upstream
+        id: fetch
+        run: |
+          set -euo pipefail
+          git remote add upstream "$UPSTREAM_REPO" 2>/dev/null || \
+            git remote set-url upstream "$UPSTREAM_REPO"
+          git fetch upstream "$UPSTREAM_BRANCH" --tags --quiet
+
+          upstream_sha="$(git rev-parse "upstream/$UPSTREAM_BRANCH")"
+          echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+
+          # Already contains it -> nothing upstream has that we lack. Note this
+          # is "contains", not "equals": our branch is upstream plus our own
+          # commits, so it can never equal the upstream tip.
+          if git merge-base --is-ancestor "$upstream_sha" HEAD; then
+            echo "behind=false" >> "$GITHUB_OUTPUT"
+            echo "Already on top of ${UPSTREAM_BRANCH} ($upstream_sha)."
+          else
+            echo "behind=true" >> "$GITHUB_OUTPUT"
+            echo "New upstream work on ${UPSTREAM_BRANCH}:"
+            git log --oneline "HEAD..upstream/$UPSTREAM_BRANCH"
+          fi
+
+      - name: Rebase our commits onto upstream
+        id: rebase
+        if: steps.fetch.outputs.behind == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name  "sparky3387"
+          git config user.email "sparky3387@users.noreply.github.com"
+
+          # Replays exactly the commits upstream does not have, which is our set.
+          if git rebase "upstream/$UPSTREAM_BRANCH"; then
+            echo "conflicted=false" >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "conflicted=true"
+              echo "files<<EOF"
+              git diff --name-only --diff-filter=U || true
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            git rebase --abort || true
+            # Do not fail the step: the issue below is the useful output, and a
+            # red X with no explanation is what this workflow exists to avoid.
+          fi
+
+      - name: Open an issue when the rebase conflicts
+        if: steps.rebase.outputs.conflicted == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FILES: ${{ steps.rebase.outputs.files }}
+          UPSTREAM_SHA: ${{ steps.fetch.outputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+          title="Rebase onto ${UPSTREAM_BRANCH} conflicts"
+          # One open issue, not one per day: reopen-and-comment rather than
+          # filing a duplicate every time the schedule fires.
+          existing="$(gh issue list --state open --search "$title in:title" \
+                        --json number --jq '.[0].number // empty')"
+          body="$(printf '%s\n' \
+            "Upstream \`${UPSTREAM_BRANCH}\` moved to \`${UPSTREAM_SHA}\` and our commits no longer replay cleanly." \
+            "" \
+            "Conflicting files:" \
+            '```' "${FILES}" '```' \
+            "" \
+            "Nothing was pushed and no build ran. Resolve locally:" \
+            '```' \
+            "git fetch upstream ${UPSTREAM_BRANCH}" \
+            "git switch ${FORK_BRANCH}" \
+            "git rebase upstream/${UPSTREAM_BRANCH}" \
+            '```' \
+            "" \
+            "Every conflict seen so far has been additive (upstream grew a list we also add to), so keep upstream's text and append ours rather than choosing a side.")"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body" --label upstream || \
+              gh issue create --title "$title" --body "$body"
+          fi
+
+      - name: Fail the run on a conflict
+        if: steps.rebase.outputs.conflicted == 'true'
+        run: |
+          echo "::error::Rebase onto ${UPSTREAM_BRANCH} conflicted; see the issue just filed."
+          exit 1
+
+      - name: Push the rebased branch
+        if: steps.rebase.outputs.conflicted == 'false'
+        run: |
+          set -euo pipefail
+          # --force-with-lease, never --force: a rebase rewrites history, but if
+          # somebody pushed to this branch while the job ran we must lose, not
+          # them. Without the lease this workflow could silently delete work.
+          git push --force-with-lease origin "HEAD:$FORK_BRANCH"
+
+      - name: Build the result
+        # Also runs on a manual force_build, so the build can be kicked without
+        # waiting for upstream to move.
+        if: |
+          steps.rebase.outputs.conflicted == 'false' ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.force_build == 'true')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh workflow run ps5.yml --ref "$FORK_BRANCH"
+          echo "Dispatched ps5.yml on ${FORK_BRANCH}."
+          echo "The payload lands as a run ARTIFACT (ShadowMountPlus_<describe>.zip);" \
+               "ps5.yml only cuts a Release for tag pushes."
