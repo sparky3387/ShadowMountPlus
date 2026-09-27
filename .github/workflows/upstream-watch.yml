@@ -166,6 +166,14 @@ jobs:
           # somebody pushed to this branch while the job ran we must lose, not
           # them. Without the lease this workflow could silently delete work.
           git push --force-with-lease origin "HEAD:$FORK_BRANCH"
+          # TAGS TOO, and this is not tidiness. The build stamps its version from
+          # `git describe --tags`, ps5.yml checks out only THIS repo, and upstream's
+          # release tags live upstream -- so without this the fork describes against
+          # whatever stale tag it happens to hold. Measured: a branch that is
+          # 1.7beta2-14 locally built as "1.7alpha13fix1-43" in CI, naming a release
+          # 30 commits older than the code in the binary. The version banner is the
+          # one thing a deployed payload is identified by.
+          git push --tags origin || true
 
       - name: Build the result
         # Also runs on a manual force_build, so the build can be kicked without
