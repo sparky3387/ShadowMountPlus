@@ -128,7 +128,8 @@ jobs:
           title="Rebase onto ${UPSTREAM_BRANCH} conflicts"
           # One open issue, not one per day: reopen-and-comment rather than
           # filing a duplicate every time the schedule fires.
-          existing="$(gh issue list --state open --search "$title in:title" \
+          existing="$(gh issue list -R "$GITHUB_REPOSITORY" --state open \
+                        --search "$title in:title" \
                         --json number --jq '.[0].number // empty')"
           body="$(printf '%s\n' \
             "Upstream \`${UPSTREAM_BRANCH}\` moved to \`${UPSTREAM_SHA}\` and our commits no longer replay cleanly." \
@@ -145,10 +146,10 @@ jobs:
             "" \
             "Every conflict seen so far has been additive (upstream grew a list we also add to), so keep upstream's text and append ours rather than choosing a side.")"
           if [ -n "$existing" ]; then
-            gh issue comment "$existing" --body "$body"
+            gh issue comment "$existing" -R "$GITHUB_REPOSITORY" --body "$body"
           else
-            gh issue create --title "$title" --body "$body" --label upstream || \
-              gh issue create --title "$title" --body "$body"
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body "$body" --label upstream || \
+              gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body "$body"
           fi
 
       - name: Fail the run on a conflict
@@ -176,7 +177,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh workflow run ps5.yml --ref "$FORK_BRANCH"
+          # -R is not optional. This checkout carries an `upstream` remote as well
+          # as `origin`, gh resolved its repo from the remotes, picked upstream, and
+          # tried to dispatch a build in drakmor's repository -- HTTP 403 on the
+          # first live run. GITHUB_REPOSITORY is the only unambiguous answer.
+          gh workflow run ps5.yml -R "$GITHUB_REPOSITORY" --ref "$FORK_BRANCH"
           echo "Dispatched ps5.yml on ${FORK_BRANCH}."
           echo "The payload lands as a run ARTIFACT (ShadowMountPlus_<describe>.zip);" \
                "ps5.yml only cuts a Release for tag pushes."
